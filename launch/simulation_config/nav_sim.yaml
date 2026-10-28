@@ -1,0 +1,249 @@
+# =============================================================================
+# 仿真导航链路参数（launch/simulation.py 使用）
+#
+#   Gazebo /Odometry              (nav_msgs/Odometry, 位姿 + 速度) --> nav/odom
+#   Gazebo /cloud_registered_body (sensor_msgs/PointCloud2)       --> terrain_map
+#   /goal_pose (rviz 2D Goal Pose)                                --> astar_planner
+#
+#   nav/odom + /goal_pose            --> finenav_astar_planner   --> nav/global_path
+#   nav/odom + nav/global_path       --> finenav_mppi_controller --> nav/cmd_vel
+#   nav/cmd_vel                      --> [TwistPublisher] /cmd_vel
+#
+# -----------------------------------------------------------------------------
+# 参数格式说明（对应 ~/.fins/sdk/sdk/fins/server/parameter_server.cpp）
+#
+# 1. 支持嵌套：解析器按缩进栈拼出点分全键，所以
+#        finenav_mppi_controller:
+#          CostCritic:
+#            cost_weight: 3.81
+#    等价于键 "finenav_mppi_controller.CostCritic.cost_weight"，
+#    正好对上代码里 fins::ParamLoader("finenav_mppi_controller.CostCritic")。
+#
+# 2. 顶层 key 必须和节点里 ParamLoader 的前缀一致：
+#    AstarPlanner / SimpleMap / finenav_mppi_controller。
+#
+# 3. **不要**用 Studio 导出的「模板格式」，也就是别写
+#        cost_weight:
+#          default_value: 3.81
+#          type: double
+#    那样会多出一层，全键变成 ...cost_weight.default_value，找不到 →
+#    静默回落到代码里的默认值（这是最容易踩的坑）。
+#
+# 4. 值一律按字符串保存并现场转换；bool 只认 true / 1 / on。
+#
+# 5. 行内 # 之后的内容会被无条件当注释砍掉（哪怕在引号里），
+#    所以路径里别出现 #。
+# -----------------------------------------------------------------------------
+#
+# 同目录下的 mppi.yaml / simple_map.yaml 是「单节点参数表」（带逐项说明），
+# 供 Studio 或单独调试某个节点时用；simulation.py **不会**加载它们。
+# 改仿真参数请改本文件，避免两个地方不一致。
+# =============================================================================
+
+# --------------------------------------------------------------- 全局规划器
+AstarPlanner:
+  # map_server 格式栅格地图；~ 会自动展开成 $HOME
+  map_yaml: "~/Map/Simulator/map/map.yaml"
+  # 输出路径/代价图的坐标系
+  frame_id: "map"
+  # 路径重采样间距（m），MPPI 需要稠密路径
+  step_size: 0.15
+  # 重规划周期（s）：机器人每走这么久就重算一次全局路径
+  replan_period: 1.0
+  # 目标点落在障碍/膨胀带里时，允许搜索最近可行格的最大半径（m）。
+  # 至少要 >= inflation_radius，否则「点在膨胀带深处」的目标会被直接判成不可达；
+  # 挪过去的那个格会作为路径终点（见 planner.cpp 的 plan_goal_）。
+  goal_tolerance: 1.0
+
+  # ---- 车体尺寸约束（costmap_2d inflation 语义）----
+  # 内切圆半径：车体中心进入该范围即视为碰撞（lethal）。
+  #
+  # 这里必须同时满足两件事，否则路径会「擦着障碍物边缘过」：
+  #   (a) 比自车大 —— apr_robot.urdf 的底盘是 radius 0.25 的圆柱，
+  #       轮子外缘 0.22+0.02=0.24、万向轮 0.15+0.045=0.195，所以真实外接半径 = 0.25；
+  #   (b) 比下游 MPPI 的碰撞包络大 —— 它的 CostCritic 用 5 点足迹（中心 + 4 角）
+  #       压在原始障碍格上，对角方向的需求是 sqrt(l_half² + w_half²)；
+  #       SimpleMap 的 l_half/w_half 都是 0.25 → 对角 0.354，再加上本地栅格
+  #       0.1 m 的离散误差 ~0.05 → 实际要求 ~0.40 m。
+  #
+  # 之前配的 0.28 只比自车半径多 3 cm，用脚本实测（见 docs §8.5）：
+  #   A* 本体留白 0.55 m，但视线拉直后掉到 0.269~0.292 m，
+  #   已经钻进本地 MPPI 的碰撞包络里 → CostCritic 把所有轨迹判成 collision。
+  # 现在 0.45 = 0.40 的本地需求 + 5 cm 余量，实测拉直后仍有 0.53~0.57 m。
+  inscribed_radius: 0.45
+  # 膨胀半径：内切圆之外到这里的区域不可通行，只是代价指数衰减。
+  # 给 0.85（比 inscribed 多 0.40 m 的梯度带），代价才有足够纵深把路径推到走廊中间。
+  inflation_radius: 0.85
+  # 代价衰减系数（越大衰减越快，越贴墙越贵）
+  cost_scaling_factor: 3.0
+  # A* 对代价的敏感度：0 = 只求最短路；越大越愿意绕远去走走廊中间
+  cost_penalty_weight: 3.0
+
+  # 未知栅格是否可通行（true = 可走但代价较高；false = 当障碍）
+  allow_unknown: true
+  # 视线拉直，去掉 A* 的锯齿
+  smooth_path: true
+  # 拉直时的额外留白（m）。拉直必须比 inscribed_radius 再多留一点：
+  # 只判 isLethal 的话，直线会正好贴在 lethal 边界上（实测 0.27~0.29 m），
+  # 等于把 A* 用代价好不容易推出来的「走走廊中间」全部丢掉。
+  smooth_clearance_margin: 0.05
+
+# ------------------------------------------------- 滚动局部栅格地图（2D 投影）
+SimpleMap:
+  # 栅格数量（正方形），200 x 0.1 m = 20 m 见方
+  map_size: 200
+  resolution: 0.1
+  # 车体半长 / 半宽，MPPI 的 CostCritic 用「中心 + 4 角」5 点压在障碍格上判碰。
+  # 实车是 radius 0.25 的圆柱，用它的外接正方形 ±0.25（对角 = 0.354 m）。
+  # 不要写 0.28/0.25 这种组合：那等于假装车是个 0.56 x 0.50 的方盒子，
+  # 对角需求涨到 0.375 m，会比全局规划器的留白还大 → 路径一进场就被判碰撞。
+  l_half: 0.25
+  w_half: 0.25
+  # 仅作参考/对外 get_radius 用；CostCritic 实际走的是上面的 5 点足迹
+  robot_radius: 0.25
+  # 只保留这个高度带内的点当障碍（车体系，base_link 在地面 z=0）
+  # 低于 0.1 m 的是地面，高于 1.5 m 的是天花板/高处结构，二维导航不关心
+  min_obstacle_height: 0.10
+  max_obstacle_height: 1.50
+
+# ------------------------------------------------------------- MPPI 控制器
+finenav_mppi_controller:
+  # 控制频率（Hz）。注意 model_dt 应当等于 1/freq，
+  # 否则 control sequence 的时序和前向模型对不上
+  freq: 10.0
+  # 时间步长（s）与步数：horizon = time_steps * model_dt = 3.0 s
+  model_dt: 0.05
+  time_steps: 30
+  # 采样条数。加权平均的方差 ∝ 1/N_eff，1000 条在 (vx, wz) × 30 步 = 60 维空间里太稀疏，
+  # softmax 稍有集中就变成「少数几个样本说了算」。2000 是代码默认值，
+  # 算力上问题不大（观察日志里的 "MPPI calculation time"，只要远小于 100 ms 就行）。
+  batch_size: 3000
+  iteration_count: 1
+  # softmax 温度：costs_normalized = costs - min(costs)，软权重 ∝ exp(-ΔC / temperature)。
+  # 取 0.3 时 ΔC=1 的样本权重只有 3.6%，等于「几乎取 argmin」——
+  # 而每个样本 = 上一周期的控制序列 + 高斯噪声，取 argmin 就等于「把某个样本的噪声
+  # 原样发出去」，wz 指令会变成白噪声。0.5 让 10~30 个相近样本一起参与加权平均，
+  # 噪声被平均掉，指令才平滑。
+  temperature: 0.3
+  gamma: 0.015
+  motion_model: "DiffDrive"
+
+  # 速度约束（仿真差速底盘：轮距 0.44 m，轮径 0.12 m，max_wheel_acceleration 15 rad/s²）
+  # 直接对齐仿真自带 simple_nav 导航节点的包络：linear_speed 0.3 m/s、angular_speed 0.6 rad/s。
+  # 不要按 nav2 的经验值给 0.5/1.0：底盘能跟上的角速度就这么多，
+  # 上限给得越大，抖动幅度就越大（抖动幅度 ≈ wz_std，且被 wz_max 兜住）。
+  vx_max: 0.5
+  vx_min: -0.35
+  vy_max: 0.0
+  wz_max: 2.0
+
+  # 采样标准差 —— 这是抖动幅度的直接来源，必须跟上面的上限配套。
+  # 解释：updateControlSequence 里 control_sequence = Σ softmax_i * (cs + noise_i)，
+  # 当 softmax 接近 argmin 时 ≈ cs + noise_best，于是「发出去的指令 = 采样噪声」。
+  # 所以 wz_std 0.4 就意味着 10 Hz 下 ±0.4 rad/s 的随机摆动，这在 Gazebo 里看着就是剧烈左右摇。
+  # 经验：std ≈ 0.25 × 上限（比上限小一个量级，但不要小到 0.05 以下，
+  #      否则样本全挤在一起、代价差分辨不出来，轨迹会退化）。
+  vx_std: 0.5
+  vy_std: 0.0
+  wz_std: 0.4
+
+  ConstraintCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 4.0
+
+  CostCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 3.81
+    critical_cost: 100.0      # costmap 代价 ≥ 253 时施加此惩罚
+    consider_footprint: true  # 使用完整 footprint 检查
+    collision_cost: 1000000.0 # 碰撞轨迹惩罚
+    near_goal_distance: 1.0   # 距目标 ≤ 此距离时关闭 CostCritic (m)
+    trajectory_point_step: 2  # 评估时跳过的轨迹点数（性能优化）
+
+  # GoalCritic：距目标足够近时，引导机器人直接趋向目标点
+  GoalCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    threshold_to_consider: 0.5   # 距目标 ≤ 此距离时激活 (m)
+
+  # 注意：controller.cpp 的 initCritics() 里没有注册 GoalAngleCritic，
+  # 所以下面这段当前不生效（改了也不会有反应），保留是为了和 mppi.yaml 对齐。
+  GoalAngleCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 3.0
+    threshold_to_consider: 0.5
+
+  PathAlignCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 14.0
+    max_path_occupancy_ratio: 0.05  # 允许全局路径穿过占用格的最大比例
+    trajectory_point_step: 4
+    threshold_to_consider: 0.5
+    offset_from_furthest: 20        # 只有轨迹规划足够远时才考虑此 Critic
+    use_path_orientations: false    # 是否跟随全局规划的朝向（Hybrid A* 时开启）
+
+  # 和 PathAlignCritic 功能重叠，仿真里关掉，避免重复计费
+  PathAlignLegacyCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 10.0
+    max_path_occupancy_ratio: 0.07
+    trajectory_point_step: 4
+    threshold_to_consider: 0.5
+    offset_from_furthest: 20
+    use_path_orientations: false
+
+  # PathFollowCritic：鼓励贴近全局路径（距离最近化）
+  PathFollowCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    offset_from_furthest: 15
+    threshold_to_consider: 0.5
+
+  # PathAngleCritic：惩罚与全局路径前方点夹角过大的轨迹
+  # 注意：PathAngleCritic.mode 在 finenav_mppi_controller 中尚未实现
+  PathAngleCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 2.0
+    offset_from_furthest: 15
+    threshold_to_consider: 0.5
+    max_angle_to_furthest: 1.0
+
+  PreferForwardCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    threshold_to_consider: 0.5
+
+  TwirlingCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 10.0
+
+  # ===== 抖动元凶：VelocityDeadbandCritic 在仿真里必须关掉 =====
+  # 它的代价是 cost = Σ_t [ (db_vx-|vx_t|)⁺ + (db_wz-|wz_t|)⁺ ] * model_dt * weight
+  # （velocity_deadband_critic.cpp:95-101，只在 |v| 低于阈值时罚，且对符号不敏感）。
+  #
+  # 代入 db_wz=0.2、weight=35、model_dt=0.1、time_steps=30：
+  #   「直行、wz 恒为 0」的样本        → (0.2-0)*0.1*30*35 = 21.0
+  #   「wz 恒为 0.2」的样本            → 0
+  #   而绕这么一圈会让轨迹偏离路径 ~0.5 m，PathAlignCritic（weight 14，平方距离）
+  #   也才付出 ~14*0.25 = 3.5 的代价。
+  # 也就是说这一项以 6:1 的压倒性优势逼着控制器「必须一直转，且至少 0.2 rad/s」，
+  # 但它对正负完全中立 → 由噪声决定往左还是往右 → 就是 ±wz 反复横跳。
+  # （db_wz 的代码默认值是 0.05；上一版把它抬到 0.2 是我的失误。）
+  #
+  # 真机有电机死区时它才有意义；Gazebo 的差速插件没有死区，所以关掉。
+  # 若要打开，请用 [0.05, 0.05, 0.05] + weight 1~2，绝不要给 wz 单独的 0.2 门槛。
+  VelocityDeadbandCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 1.0
+    deadband_velocities: [0.05, 0.05, 0.05]

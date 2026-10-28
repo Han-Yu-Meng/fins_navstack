@@ -1,0 +1,8 @@
+SimpleMap:
+  map_size: 200
+  resolution: 0.1
+  l_half: 0.4
+  w_half: 0.35
+  robot_radius: 0.85
+  min_obstacle_height: 0.1
+  max_obstacle_height: 1.5

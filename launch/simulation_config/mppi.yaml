@@ -1,0 +1,161 @@
+
+# MPPI Controller Parameters for FineNav-Engine
+#
+# Parameter path:  /hello_finenav/mppi_layer  (pnode created by ControlLayer)
+#                  under prefix  finenav_mppi_controller.*
+#
+# ──────────────────────────────────────────────────────────────────────────────
+# 注意：与 nav2 原版的差异
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. critics 列表【无法动态配置】
+#    finenav_mppi_controller 中所有 Critic（ConstraintCritic / CostCritic /
+#    GoalCritic / GoalAngleCritic / ObstaclesCritic / PathAlignCritic /
+#    PathAlignLegacyCritic / PathAngleCritic / PathFollowCritic /
+#    PreferForwardCritic / TwirlingCritic / VelocityDeadbandCritic）均被
+#    硬编码注册（controller.hpp 75-86 行）。
+#    若要新增或移除 Critic，需修改源码重新编译。
+#    在本配置文件中通过各 Critic 的 enabled 字段来启用/禁用。
+#
+# 2. 以下 nav2 参数在 finenav_mppi_controller 中【尚未实现】，设置无效：
+#      ax_max / ax_min / ay_max / ay_min / az_max  （加速度约束）
+#      prune_distance                              （轨迹裁剪距离）
+#      reset_period                                （重置周期）
+#      regenerate_noises                           （噪声重新生成）
+#      visualize / TrajectoryVisualizer            （轨迹可视化开关）
+#      PathAngleCritic.mode                        （路径角度评估模式）
+#
+# 3. 不再支持 RotationShimController 外壳，直接使用 MPPIController。
+# ──────────────────────────────────────────────────────────────────────────────
+
+finenav_mppi_controller:
+  freq: 10.0
+
+  # ── 轨迹优化器基础参数 ─────────────────────────────────────────────────
+  time_steps: 30          # 每条候选轨迹的时间步数
+  model_dt: 0.05          # 单步时长 (s)，确保 controller_period == model_dt
+  batch_size: 3000       # 每次迭代的采样轨迹数
+  iteration_count: 1      # 每个控制周期内的优化迭代次数（实时性考虑设为 1）
+  temperature: 0.3        # 0→ 只取最优轨迹；很大 → 近均匀平均
+  gamma: 0.015            # 控制输入能量正则化系数
+  motion_model: "DiffDrive"  # 运动模型: DiffDrive | Omni | Ackermann
+
+  # ── 速度约束 ──────────────────────────────────────────────────────────
+  vx_max: 0.5             # 最大前向速度 (m/s)
+  vx_min: -0.35           # 最小前向速度（负值允许倒退）
+  vy_max: 0.0             # 最大横向速度（差速底盘设为 0）
+  wz_max: 2.0            # 最大角速度 (rad/s)
+
+  # ── 噪声采样标准差 ────────────────────────────────────────────────────
+  vx_std: 0.5             # vx 采样标准差
+  vy_std: 0.2             # vy 采样标准差
+  wz_std: 0.4             # wz 采样标准差
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Critic 参数
+  # 所有 Critic 均已注册，通过 enabled 字段控制是否参与评分
+  # ══════════════════════════════════════════════════════════════════════
+
+  # ConstraintCritic：惩罚超出动力学约束的轨迹
+  ConstraintCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 4.0
+
+  # GoalCritic：距目标足够近时，引导机器人直接趋向目标点
+  GoalCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    threshold_to_consider: 0.5   # 距目标 ≤ 此距离时激活 (m)
+
+  # GoalAngleCritic：距目标足够近时，惩罚朝向与目标姿态偏差
+  GoalAngleCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 3.0
+    threshold_to_consider: 0.5
+
+  # PreferForwardCritic：鼓励前进，抑制倒退
+  PreferForwardCritic:
+    enabled: false            # 差速底盘若无需倒退可开启
+    cost_power: 1
+    cost_weight: 5.0
+    threshold_to_consider: 0.5
+
+  # CostCritic：直接使用 costmap 代价进行避障惩罚（推荐启用）
+  CostCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 3.81
+    critical_cost: 100.0      # costmap 代价 ≥ 253 时施加此惩罚
+    consider_footprint: true  # 使用完整 footprint 检查
+    collision_cost: 1000000.0 # 碰撞轨迹惩罚
+    near_goal_distance: 1.0   # 距目标 ≤ 此距离时关闭 CostCritic (m)
+    trajectory_point_step: 2  # 评估时跳过的轨迹点数（性能优化）
+
+  # ObstaclesCritic：基于膨胀层的斥力场惩罚（与 CostCritic 二选一）
+  ObstaclesCritic:
+    enabled: false
+    cost_power: 1
+    consider_footprint: true
+    collision_cost: 10.0
+    collision_margin_distance: 0.05
+    critical_weight: 20.0
+    near_goal_distance: 0.5
+    repulsion_weight: 2.5
+    inflation_radius: 0.5     # 膨胀半径 (m)，需与 costmap 膨胀层匹配
+    cost_scaling_factor: 4.0  # 膨胀代价缩放系数，需与 costmap 膨胀层匹配
+
+  # PathAlignCritic：鼓励局部轨迹方向与全局路径对齐
+  PathAlignCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 14.0
+    max_path_occupancy_ratio: 0.05  # 允许全局路径穿过占用格的最大比例
+    trajectory_point_step: 4
+    threshold_to_consider: 0.5
+    offset_from_furthest: 20        # 只有轨迹规划足够远时才考虑此 Critic
+    use_path_orientations: false    # 是否跟随全局规划的朝向（Hybrid A* 时开启）
+
+  # PathAlignLegacyCritic：旧版路径对齐，通常用 PathAlignCritic 代替
+  PathAlignLegacyCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 10.0
+    max_path_occupancy_ratio: 0.07
+    trajectory_point_step: 4
+    threshold_to_consider: 0.5
+    offset_from_furthest: 20
+    use_path_orientations: false
+
+  # PathFollowCritic：鼓励贴近全局路径（距离最近化）
+  PathFollowCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    offset_from_furthest: 15
+    threshold_to_consider: 0.5
+
+  # PathAngleCritic：惩罚与全局路径前方点夹角过大的轨迹
+  # 注意：PathAngleCritic.mode 在 finenav_mppi_controller 中尚未实现
+  PathAngleCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 2.0
+    offset_from_furthest: 15
+    threshold_to_consider: 0.5
+    max_angle_to_furthest: 1.0
+
+  # VelocityDeadbandCritic：惩罚死区内的速度（防止低速抖动）
+  VelocityDeadbandCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 35.0
+    deadband_velocities: [0.05, 0.05, 0.2]  # [vx, vy, wz]
+
+  # TwirlingCritic：惩罚全向底盘不必要的自旋（差速底盘可关闭）
+  TwirlingCritic:
+    enabled: false
+    cost_power: 1
+    cost_weight: 10.0
+

@@ -1,0 +1,17 @@
+name: fins_navstack
+repos:
+    src/FAST_LIO:
+        url: https://github.com/Han-Yu-Meng/FAST_LIO
+        version: main
+    src/global_localization:
+        url: https://github.com/Han-Yu-Meng/global_localization
+        version: main
+    src/livox_driver2:
+        url: https://github.com/Han-Yu-Meng/livox_ros_driver2
+        version: master
+    src/pointcloud_converter:
+        url: https://github.com/Han-Yu-Meng/pointcloud_converter
+        version: main
+    src/ros_bridge:
+        url: https://github.com/Han-Yu-Meng/ros_bridge
+        version: main

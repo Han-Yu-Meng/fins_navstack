@@ -1,0 +1,45 @@
+GlobalLocalization:
+  # bbs 算法运行使用的线程数
+  num_threads: 16
+  
+  # BBS 粗定位匹配前，对实时累加点云进行下采样的网格大小 (单位: 米)
+  bbs_leaf_size: 0.5
+  
+  # BBS 匹配得分阈值 (0.0~1.0)，低于此百分比认为定位失败
+  score_threshold: 0.3
+  
+  # 点云累加时长 (单位: 秒)，系统会累加这段时间的 odom 系点云后再进行一次定位任务
+  accumulation_time: 1.0
+  
+  # BBS 多层级体素地图的最底层分辨率 (单位: 米)
+  min_level_res: 0.7
+  
+  # BBS 多层级体素地图的总层数
+  max_level: 6
+  
+  # 算法内部（BBS与GICP）使用的全局地图下采样粒度 (单位: 米)
+  global_leaf_size: 0.8
+  
+  # GICP 精定位跟踪时，对当前帧点云的采样粒度 (单位: 米)
+  registered_leaf_size: 0.1
+  
+  # 精定位 GICP 寻找对应点时的最大距离平方阈值 (单位: 米^2，4.0 代表 2米)
+  max_dist_sq_fine: 3.0
+  
+  # GICP 配准允许的最大误差阈值，超过此值认为匹配无效并增加失败计数
+  max_gicp_error: 5000
+  
+  # 最终在可视化界面（global_map_viz）显示的地图采样粒度 (单位: 米)
+  viz_leaf_size: 0.05
+  
+  # BBS 体素地图数据的预计算缓存目录
+  voxel_dir: "/home/fins/Map/YunJing_Indoor/voxel_map/"
+  
+  # 全局 PCD 地图文件的绝对路径
+  map_dir: "/home/fins/Map/YunJing_Indoor/map/map.pcd"
+  
+  tracking_interval: 1.0 # gicp 周期
+  smooth_enabled: true # 平滑 map->odom
+  smooth_alpha: 0.3
+  pose_trigger: "tf" # "tf" = publish every odom callback, "gicp" = publish only when GICP updates
+  planar_constraint: false # 平面约束
